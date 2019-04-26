@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -271,6 +272,12 @@ func (c *cqpbclient) ServerSendSystemJSON(rstype ResultType, data websocketSyste
 		logger.Service.Field("Server Socket").Errorf("%s", err.Error())
 		return
 	}
+	defer func() { //catch or finally
+		if err := recover(); err != nil { //catch
+			logger.Service.Field("Server Socket").Errorf("ServerSendSystemJSON - Exception: %v\n", err)
+			os.Exit(1)
+		}
+	}()
 	c.servConn.Send(websocket.BinaryMessage, payload)
 }
 
@@ -279,6 +286,12 @@ func (c *cqpbclient) APISendJSON(data interface{}) {
 	if !c.IsAPIOk() {
 		return
 	}
+	defer func() { //catch or finally
+		if err := recover(); err != nil { //catch
+			logger.Service.Field("Server Socket").Errorf("APISendJSON - Exception: %v\n", err)
+			os.Exit(1)
+		}
+	}()
 	msg, _ := json.Marshal(data)
 	err := c.apiConn.Send(websocket.TextMessage, msg)
 	if err != nil {

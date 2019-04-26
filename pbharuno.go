@@ -207,6 +207,12 @@ func (bot *haruno) Run() {
 }
 
 func main() {
+	defer func() { //catch or finally
+		if err := recover(); err != nil { //catch
+			fmt.Printf("main - Exception: %v\n", err)
+			os.Exit(1)
+		}
+	}()
 	bot.Initialize()
 	bot.Run()
 }
