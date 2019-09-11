@@ -1,4 +1,4 @@
-package coolq
+package xproject
 
 type websocketSystem struct {
 	MsgType string `json:"msg_type"`

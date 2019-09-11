@@ -15,6 +15,8 @@ import (
 	"github.com/haruno-bot/haruno/clients"
 	"github.com/haruno-bot/haruno/kcwiki_msgtransfer_protobuf"
 	"github.com/haruno-bot/haruno/logger"
+
+	"github.com/haruno-bot/haruno/util"
 )
 
 // cqpbclient 酷q机器人连接客户端
@@ -28,9 +30,14 @@ type cqpbclient struct {
 	apiURL         string
 	pluginEntries  map[string]pluginEntry
 	echoqueue      map[int64]bool
-	servConn       *clients.WSClient
-	servToken      string
-	pluginCallback map[string]func([]byte)
+	servConn       *clients.XWSClient
+	pluginCallback map[string]func(string, []byte)
+}
+
+func handleXConnect(conn *clients.XWSClient) {
+	if conn.IsConnected() {
+		logger.Infof("%s服务已成功连接！", conn.Name)
+	}
 }
 
 // RegisterAllPlugins 注册所有的插件
@@ -94,9 +101,8 @@ func (c *cqpbclient) RegisterAllPlugins() {
 
 // Initialize 初始化客户端
 // token 酷q机器人的access token
-func (c *cqpbclient) Initialize(token, servToken string) {
+func (c *cqpbclient) Initialize(token string) {
 	c.token = token
-	c.servToken = servToken
 	c.httpConn = clients.NewHTTPClient()
 	c.httpConn.Header.Set("Authorization", fmt.Sprintf("Token %s", c.token))
 
@@ -106,7 +112,7 @@ func (c *cqpbclient) Initialize(token, servToken string) {
 	// 注册连接事件回调
 	c.apiConn.OnConnect = handleConnect
 	c.eventConn.OnConnect = handleConnect
-	c.servConn.OnConnect = handleConnect
+	c.servConn.OnConnect = handleXConnect
 	// 注册错误事件回调
 	c.apiConn.OnError = func(err error) {
 		logger.Field("cqpbclient api conn error").Error(err.Error())
@@ -156,31 +162,37 @@ func (c *cqpbclient) Initialize(token, servToken string) {
 	}
 	// 注册服务器推送事件回调
 	c.servConn.OnMessage = func(raw []byte) {
-		wsWrapper := new(kcwiki_msgtransfer_protobuf.Websocket)
-		err := proto.Unmarshal(raw, wsWrapper)
+		rawBytes, err := util.AESGCMDecrypt(raw, c.servConn.SymmetricKey)
 		if err != nil {
 			logger.Service.Field("Server Socket").Errorf("%s", err.Error())
 			return
 		}
-		switch wsWrapper.GetProtoType() {
-		case kcwiki_msgtransfer_protobuf.Websocket_SYSTEM:
+		xTrafficProto := new(kcwiki_msgtransfer_protobuf.XTrafficProto)
+		err = proto.Unmarshal(rawBytes, xTrafficProto)
+		if err != nil {
+			logger.Service.Field("Server Socket").Errorf("%s", err.Error())
+			return
+		}
+		// logger.Service.Field("Server Socket").Infof("msg coming %s - %s", wsWrapper.GetProtoType(), wsWrapper.GetProtoPayload())
+		switch xTrafficProto.GetProtoType() {
+		case kcwiki_msgtransfer_protobuf.XTrafficProto_SYSTEM:
 			wsSystem := new(websocketSystem)
-			err := json.Unmarshal(wsWrapper.GetProtoPayload(), wsSystem)
+			err := json.Unmarshal(xTrafficProto.GetProtoPayload(), wsSystem)
 			if err != nil {
 				logger.Service.Field("Server Socket").Errorf("%s", err.Error())
 				return
 			}
 			logger.Service.Field("Server Socket").Successf("%s - %s", wsSystem.MsgType, wsSystem.Data)
-		case kcwiki_msgtransfer_protobuf.Websocket_NON_SYSTEM:
-			module := wsWrapper.GetProtoModule()
-			if wsWrapper.GetProtoCode() != kcwiki_msgtransfer_protobuf.Websocket_SUCCESS {
-				logger.Service.Field(module).Infof("%s", string(wsWrapper.GetProtoPayload()))
+		case kcwiki_msgtransfer_protobuf.XTrafficProto_NON_SYSTEM:
+			module := xTrafficProto.GetProtoModule()
+			if xTrafficProto.GetProtoCode() != kcwiki_msgtransfer_protobuf.XTrafficProto_SUCCESS {
+				logger.Service.Field(module).Infof("%s", string(xTrafficProto.GetProtoPayload()))
 			}
 			if c.pluginCallback[module] == nil {
-				logger.Service.Field(module).Error("could not find module")
+				logger.Service.Field(module).Errorf("could not find module: %s", module)
 				return
 			}
-			c.pluginCallback[module](wsWrapper.GetProtoPayload())
+			c.pluginCallback[module](xTrafficProto.GetProtoSender(), xTrafficProto.GetProtoPayload())
 		}
 	}
 
@@ -209,15 +221,13 @@ func (c *cqpbclient) Initialize(token, servToken string) {
 // Connect 连接远程酷q api服务
 // wsURL 形如 ws://127.0.0.1:8080, wss://127.0.0.1:8080之类的url 用于建立ws连接
 // httpURL 形如 http://127.0.0.1:8080之类的url 用户建立http”连接“
-func (c *cqpbclient) Connect(wsURL, httpURL, servWsURL string) {
+func (c *cqpbclient) Connect(wsURL, httpURL, servWsURL, servToken, publickeyURL, authURL string) {
 	headers := make(http.Header)
 	headers.Add("Authorization", fmt.Sprintf("Token %s", c.token))
 	// 连接api服务和事件服务
 	c.apiConn.Dial(fmt.Sprintf("%s/api", wsURL), headers)
 	c.eventConn.Dial(fmt.Sprintf("%s/event", wsURL), headers)
-	c.servConn.Dial(servWsURL, http.Header{
-		"x-access-token": []string{c.servToken},
-	})
+	c.servConn.Dial(servToken, servWsURL, publickeyURL, authURL)
 	c.apiURL = httpURL
 }
 
@@ -232,22 +242,29 @@ func (c *cqpbclient) IsEventOk() bool {
 }
 
 // ServerSendNonSystemJSON 发送server json格式的数据
-func (c *cqpbclient) ServerSendNonSystemJSON(module string, data interface{}) {
+func (c *cqpbclient) ServerSendNonSystemJSON(module, recipient string, data interface{}) {
 	if !c.IsAPIOk() {
 		return
 	}
 	msg, _ := json.Marshal(data)
-	wsWrapper := new(kcwiki_msgtransfer_protobuf.Websocket)
-	wsWrapper.ProtoCode = kcwiki_msgtransfer_protobuf.Websocket_SUCCESS
-	wsWrapper.ProtoType = kcwiki_msgtransfer_protobuf.Websocket_NON_SYSTEM
-	wsWrapper.ProtoModule = module
-	wsWrapper.ProtoPayload = msg
-	payload, err := proto.Marshal(wsWrapper)
+	// logger.Service.Field("Server Socket").Infof("msg going %s - %s", module, msg)
+	xTrafficProto := new(kcwiki_msgtransfer_protobuf.XTrafficProto)
+	xTrafficProto.ProtoCode = kcwiki_msgtransfer_protobuf.XTrafficProto_SUCCESS
+	xTrafficProto.ProtoType = kcwiki_msgtransfer_protobuf.XTrafficProto_NON_SYSTEM
+	xTrafficProto.ProtoModule = module
+	xTrafficProto.ProtoPayload = msg
+	xTrafficProto.ProtoRecipient = recipient
+	payload, err := proto.Marshal(xTrafficProto)
 	if err != nil {
 		logger.Service.Field(module).Errorf("%s", err.Error())
 		return
 	}
-	c.servConn.Send(websocket.BinaryMessage, payload)
+	cipherBytes, err := util.AESGCMEncrypt(payload, c.servConn.SymmetricKey)
+	if err != nil {
+		logger.Service.Field("Server Socket").Errorf("%s", err.Error())
+		return
+	}
+	c.servConn.Send(websocket.BinaryMessage, cipherBytes)
 }
 
 // ServerSendSystemJSON 发送server json格式的数据
@@ -256,29 +273,28 @@ func (c *cqpbclient) ServerSendSystemJSON(rstype ResultType, data websocketSyste
 		return
 	}
 	msg, _ := json.Marshal(data)
-	wsWrapper := new(kcwiki_msgtransfer_protobuf.Websocket)
+	xTrafficProto := new(kcwiki_msgtransfer_protobuf.XTrafficProto)
 	switch rstype {
 	case SUCCESS:
-		wsWrapper.ProtoCode = kcwiki_msgtransfer_protobuf.Websocket_SUCCESS
+		xTrafficProto.ProtoCode = kcwiki_msgtransfer_protobuf.XTrafficProto_SUCCESS
 	case FAIL:
-		wsWrapper.ProtoCode = kcwiki_msgtransfer_protobuf.Websocket_FAIL
+		xTrafficProto.ProtoCode = kcwiki_msgtransfer_protobuf.XTrafficProto_FAILURE
 	case ERROR:
-		wsWrapper.ProtoCode = kcwiki_msgtransfer_protobuf.Websocket_ERROR
+		xTrafficProto.ProtoCode = kcwiki_msgtransfer_protobuf.XTrafficProto_ERROR
 	}
-	wsWrapper.ProtoType = kcwiki_msgtransfer_protobuf.Websocket_SYSTEM
-	wsWrapper.ProtoPayload = msg
-	payload, err := proto.Marshal(wsWrapper)
+	xTrafficProto.ProtoType = kcwiki_msgtransfer_protobuf.XTrafficProto_SYSTEM
+	xTrafficProto.ProtoPayload = msg
+	payload, err := proto.Marshal(xTrafficProto)
 	if err != nil {
 		logger.Service.Field("Server Socket").Errorf("%s", err.Error())
 		return
 	}
-	defer func() { //catch or finally
-		if err := recover(); err != nil { //catch
-			logger.Service.Field("Server Socket").Errorf("ServerSendSystemJSON - Exception: %v\n", err)
-			os.Exit(1)
-		}
-	}()
-	c.servConn.Send(websocket.BinaryMessage, payload)
+	cipherBytes, err := util.AESGCMEncrypt(payload, c.servConn.SymmetricKey)
+	if err != nil {
+		logger.Service.Field("Server Socket").Errorf("%s", err.Error())
+		return
+	}
+	c.servConn.Send(websocket.BinaryMessage, cipherBytes)
 }
 
 // APISendJSON 发送api json格式的数据
@@ -417,7 +433,7 @@ func (c *cqpbclient) GetStatus() *CQTypeGetStatus {
 var PbClient = &cqpbclient{
 	apiConn:        new(clients.WSClient),
 	eventConn:      new(clients.WSClient),
-	servConn:       new(clients.WSClient),
+	servConn:       new(clients.XWSClient),
 	pluginEntries:  make(map[string]pluginEntry),
-	pluginCallback: make(map[string]func([]byte)),
+	pluginCallback: make(map[string]func(string, []byte)),
 }

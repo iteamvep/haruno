@@ -8,7 +8,7 @@ var pbentries = []pbPluginInterface{}
 type pbPluginInterface interface {
 	pluginInterface
 	Module() string
-	Callback(data []byte)
+	Callback(sender string, data []byte)
 }
 
 // PbPluginRegister 插件注册
