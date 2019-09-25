@@ -15,6 +15,7 @@ import (
 	"github.com/haruno-bot/haruno/clients"
 	"github.com/haruno-bot/haruno/kcwiki_msgtransfer_protobuf"
 	"github.com/haruno-bot/haruno/logger"
+	"github.com/haruno-bot/haruno/xproject"
 
 	"github.com/haruno-bot/haruno/util"
 )
@@ -101,7 +102,7 @@ func (c *cqpbclient) RegisterAllPlugins() {
 
 // Initialize 初始化客户端
 // token 酷q机器人的access token
-func (c *cqpbclient) Initialize(token string) {
+func (c *cqpbclient) Initialize(token, notifier string) {
 	c.token = token
 	c.httpConn = clients.NewHTTPClient()
 	c.httpConn.Header.Set("Authorization", fmt.Sprintf("Token %s", c.token))
@@ -176,20 +177,28 @@ func (c *cqpbclient) Initialize(token string) {
 		// logger.Service.Field("Server Socket").Infof("msg coming %s - %s", wsWrapper.GetProtoType(), wsWrapper.GetProtoPayload())
 		switch xTrafficProto.GetProtoType() {
 		case kcwiki_msgtransfer_protobuf.XTrafficProto_SYSTEM:
-			wsSystem := new(websocketSystem)
+			wsSystem := new(xproject.WebsocketSystemProto)
 			err := json.Unmarshal(xTrafficProto.GetProtoPayload(), wsSystem)
 			if err != nil {
 				logger.Service.Field("Server Socket").Errorf("%s", err.Error())
+				return
+			}
+			if xproject.ModuleStatusNotify == wsSystem.MsgType {
+				if c.pluginCallback[notifier] == nil {
+					logger.Service.Field("Server Socket").Errorf("could not find notifier: %s", notifier)
+					return
+				}
+				c.pluginCallback[notifier]("", []byte(wsSystem.Data))
 				return
 			}
 			logger.Service.Field("Server Socket").Successf("%s - %s", wsSystem.MsgType, wsSystem.Data)
 		case kcwiki_msgtransfer_protobuf.XTrafficProto_NON_SYSTEM:
 			module := xTrafficProto.GetProtoModule()
 			if xTrafficProto.GetProtoCode() != kcwiki_msgtransfer_protobuf.XTrafficProto_SUCCESS {
-				logger.Service.Field(module).Infof("%s", string(xTrafficProto.GetProtoPayload()))
+				logger.Service.Field("Server Socket").Infof("%s", string(xTrafficProto.GetProtoPayload()))
 			}
 			if c.pluginCallback[module] == nil {
-				logger.Service.Field(module).Errorf("could not find module: %s", module)
+				logger.Service.Field("Server Socket").Errorf("could not find module: %s", module)
 				return
 			}
 			c.pluginCallback[module](xTrafficProto.GetProtoSender(), xTrafficProto.GetProtoPayload())

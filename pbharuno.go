@@ -32,6 +32,7 @@ type config struct {
 	ServHTTPURL  string `toml:"servHTTPURL"`
 	PublickeyURL string `toml:"publickeyURL"`
 	AuthURL      string `toml:"authURL"`
+	Notifier     string `toml:"notifier"`
 	WebRoot      string `toml:"webroot"`
 }
 
@@ -50,6 +51,7 @@ type haruno struct {
 	servHTTPURL  string
 	publickeyURL string
 	authURL      string
+	notifier     string
 	webRoot      string
 	in           windows.Handle
 	inMode       uint32
@@ -126,6 +128,7 @@ func (bot *haruno) loadConfig() {
 	bot.servHTTPURL = cfg.ServHTTPURL
 	bot.publickeyURL = cfg.PublickeyURL
 	bot.authURL = cfg.AuthURL
+	bot.notifier = cfg.Notifier
 }
 
 // Initialize 从配置文件读取配置初始化
@@ -139,7 +142,7 @@ func (bot *haruno) Initialize() {
 	logger.Service.SetLogsPath(bot.logpath)
 	logger.Service.Initialize()
 	plugins.SetupPbPlugins()
-	coolq.PbClient.Initialize(bot.cqToken)
+	coolq.PbClient.Initialize(bot.cqToken, bot.notifier)
 	go coolq.PbClient.Connect(bot.cqWSURL, bot.cqHTTPURL, bot.servWSURL, bot.servWSToken, bot.publickeyURL, bot.authURL)
 	go coolq.PbClient.RegisterAllPlugins()
 }
